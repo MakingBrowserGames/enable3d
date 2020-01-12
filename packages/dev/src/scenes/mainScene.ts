@@ -52,8 +52,8 @@ export default class MainScene extends Scene3D {
     this.input.on('pointerdown', (pointer: PointerEvent) => {
       // calculate mouse position in normalized device coordinates
       // (-1 to +1) for both components
-      const x = (pointer.x / window.innerWidth) * 2 - 1
-      const y = -(pointer.y / window.innerHeight) * 2 + 1
+      const x = (pointer.x / this.cameras.main.width) * 2 - 1
+      const y = -(pointer.y / this.cameras.main.height) * 2 + 1
       raycaster.setFromCamera({ x, y }, this.third.camera)
 
       const pos = this.third.new.vector3()
