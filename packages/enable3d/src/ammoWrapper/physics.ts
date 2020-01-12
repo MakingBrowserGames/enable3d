@@ -9,8 +9,12 @@ import { ExtendedObject3D } from '../types'
 import ThreeGraphics from '../threeWrapper'
 import { Scene3D } from '..'
 import DebugDrawer from './debugDrawer'
+import { Vector3, Mesh, MeshStandardMaterial } from 'three'
 
-export default class Physics extends EventEmitter {
+import { ConvexObjectBreaker } from 'three/examples/jsm/misc/ConvexObjectBreaker'
+import Shapes from './shapes'
+
+class Physics extends EventEmitter {
   public tmpTrans: Ammo.btTransform
   public physicsWorld: Ammo.btDiscreteDynamicsWorld
   protected dispatcher: Ammo.btCollisionDispatcher
@@ -18,12 +22,25 @@ export default class Physics extends EventEmitter {
   protected objectsAmmo: { [ptr: number]: any } = {}
   protected earlierDetectedCollisions: { combinedName: string; collision: boolean }[] = []
   protected debugDrawer: DebugDrawer
+  private convexBreaker: ConvexObjectBreaker
+  protected addRigidBody: (threeObject: ExtendedObject3D, physicsShape: any, mass: any, pos: any, quat: any) => void
+  private objectsToRemove: any[]
+  private numObjectsToRemove: number
 
   constructor(protected phaser3D: ThreeGraphics, protected scene: Scene3D) {
     super()
   }
 
   protected setup() {
+    // Initialize convexBreaker
+    this.convexBreaker = new ConvexObjectBreaker()
+
+    this.objectsToRemove = []
+    this.numObjectsToRemove = 0
+    for (var i = 0; i < 500; i++) {
+      this.objectsToRemove[i] = null
+    }
+
     // setup ammo physics
     this.setupPhysicsWorld()
 
@@ -64,7 +81,197 @@ export default class Physics extends EventEmitter {
     this.tmpTrans = new Ammo.btTransform()
   }
 
+  // private createConvexHullPhysicsShapeTEST(coords: any) {
+  //   var tempBtVec3_1 = new Ammo.btVector3(0, 0, 0)
+
+  //   var shape = new Ammo.btConvexHullShape()
+
+  //   for (var i = 0, il = coords.length; i < il; i += 3) {
+  //     tempBtVec3_1.setValue(coords[i], coords[i + 1], coords[i + 2])
+  //     var lastOne = i >= il - 3
+  //     shape.addPoint(tempBtVec3_1, lastOne)
+  //   }
+
+  //   return shape
+  // }
+
+  private createDebrisFromBreakableObject(object: ExtendedObject3D) {
+    object.material = new MeshStandardMaterial()
+    object.shape = 'hull'
+    object.breakable = false
+
+    // Add the object to the scene
+    this.phaser3D.scene.add(object)
+
+    // Add physics to the object
+    // @ts-ignore
+    this.addExisting(object)
+  }
+
+  private removeDebris(object: any) {
+    // console.log(object.ptr, object.body.ammo)
+    this.phaser3D.scene.remove(object)
+    this.physicsWorld.removeRigidBody(object.body.ammo)
+    delete this.objectsAmmo[object.ptr]
+  }
+
   public update(delta: number) {
+    let impactPoint = new Vector3()
+    let impactNormal = new Vector3()
+
+    // Step world
+    const deltaTime = delta / 1000
+    this.physicsWorld.stepSimulation(deltaTime)
+
+    // Update rigid bodies
+    for (var i = 0, il = this.rigidBodies.length; i < il; i++) {
+      var objThree = this.rigidBodies[i]
+      var objPhys = objThree.body.ammo
+      var ms = objPhys.getMotionState()
+
+      if (ms) {
+        ms.getWorldTransform(this.tmpTrans)
+        var p = this.tmpTrans.getOrigin()
+        var q = this.tmpTrans.getRotation()
+        // body offset
+        let o = objThree.body.offset
+        objThree.position.set(p.x() + o.x, p.y() + o.y, p.z() + o.z)
+        objThree.quaternion.set(q.x(), q.y(), q.z(), q.w())
+
+        objThree.collided = false
+      }
+    }
+
+    // Check collisions
+    for (var i = 0, il = this.dispatcher.getNumManifolds(); i < il; i++) {
+      var contactManifold = this.dispatcher.getManifoldByIndexInternal(i)
+
+      const key = Object.keys(contactManifold.getBody0())[0]
+
+      // @ts-ignore
+      const body0 = Ammo.castObject(contactManifold.getBody0(), Ammo.btRigidBody)
+      // @ts-ignore
+      const body1 = Ammo.castObject(contactManifold.getBody1(), Ammo.btRigidBody)
+
+      // @ts-ignore
+      const ptr0 = body0[key]
+      // @ts-ignore
+      const ptr1 = body1[key]
+      const threeObject0 = this.objectsAmmo[ptr0]
+      const threeObject1 = this.objectsAmmo[ptr1]
+
+      // console.log(threeObject0, threeObject1)
+
+      if (!threeObject0 && !threeObject1) {
+        continue
+      }
+
+      // console.log('threeObject0 section')
+
+      var breakable0 = threeObject0.breakable
+      var breakable1 = threeObject1.breakable
+
+      // console.log(breakable0, breakable1)
+
+      var collided0 = threeObject0.collided
+      var collided1 = threeObject1.collided
+
+      if ((!breakable0 && !breakable1) || (collided0 && collided1)) {
+        continue
+      }
+
+      // console.log('contact section')
+
+      var contact = false
+      var maxImpulse = 0
+      for (var j = 0, jl = contactManifold.getNumContacts(); j < jl; j++) {
+        var contactPoint = contactManifold.getContactPoint(j)
+
+        if (contactPoint.getDistance() < 0) {
+          contact = true
+          var impulse = contactPoint.getAppliedImpulse()
+
+          if (impulse > maxImpulse) {
+            maxImpulse = impulse
+            var pos = contactPoint.get_m_positionWorldOnB()
+            var normal = contactPoint.get_m_normalWorldOnB()
+            impactPoint.set(pos.x(), pos.y(), pos.z())
+            impactNormal.set(normal.x(), normal.y(), normal.z())
+          }
+
+          break
+        }
+      }
+
+      // If no point has contact, abort
+      if (!contact) continue
+
+      // Subdivision
+      var fractureImpulse = 5 //250
+
+      // since the library convexBreaker makes use of three's userData
+      // we have to clone the necessary params to threeObjectX.userData
+      const emptyV3 = new Vector3(0, 0, 0)
+      threeObject0.userData = {
+        mass: 1,
+        velocity: emptyV3,
+        angularVelocity: emptyV3,
+        breakable: breakable0,
+        physicsBody: body0
+      }
+      threeObject1.userData = {
+        mass: 1,
+        velocity: emptyV3,
+        angularVelocity: emptyV3,
+        breakable: breakable1,
+        physicsBody: body1
+      }
+
+      if (breakable0 && !collided0 && maxImpulse > fractureImpulse) {
+        var debris = this.convexBreaker.subdivideByImpact(threeObject0, impactPoint, impactNormal, 1, 2) //, 1.5)
+
+        // console.log(debris)
+
+        var numObjects = debris.length
+        for (var j = 0; j < numObjects; j++) {
+          var vel = body0.getLinearVelocity()
+          var angVel = body0.getAngularVelocity()
+          var fragment = debris[j] as ExtendedObject3D
+          fragment.userData.velocity.set(vel.x(), vel.y(), vel.z())
+          fragment.userData.angularVelocity.set(angVel.x(), angVel.y(), angVel.z())
+
+          this.createDebrisFromBreakableObject(fragment)
+        }
+
+        this.objectsToRemove[this.numObjectsToRemove++] = threeObject0
+        threeObject0.collided = true
+      }
+
+      if (breakable1 && !collided1 && maxImpulse > fractureImpulse) {
+        var debris = this.convexBreaker.subdivideByImpact(threeObject1, impactPoint, impactNormal, 1, 2) //, 1.5)
+
+        var numObjects = debris.length
+        for (var j = 0; j < numObjects; j++) {
+          var vel = body1.getLinearVelocity()
+          var angVel = body1.getAngularVelocity()
+          var fragment = debris[j] as ExtendedObject3D
+          fragment.userData.velocity.set(vel.x(), vel.y(), vel.z())
+          fragment.userData.angularVelocity.set(angVel.x(), angVel.y(), angVel.z())
+
+          this.createDebrisFromBreakableObject(fragment)
+        }
+
+        this.objectsToRemove[this.numObjectsToRemove++] = threeObject1
+        threeObject1.collided = true
+      }
+    }
+    for (var i = 0; i < this.numObjectsToRemove; i++) {
+      this.removeDebris(this.objectsToRemove[i])
+    }
+    this.numObjectsToRemove = 0
+  }
+
+  public updateOLD(delta: number) {
     const deltaTime = delta / 1000
 
     // Step world
@@ -161,3 +368,5 @@ export default class Physics extends EventEmitter {
     }
   }
 }
+
+export default Physics

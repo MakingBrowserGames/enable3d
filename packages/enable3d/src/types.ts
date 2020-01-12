@@ -110,6 +110,7 @@ export interface SphereConfig extends XYZ, Mass, CollisionFlag {
   thetaLength?: number
   friction?: number
   collisionFlag?: number
+  breakable?: boolean
 }
 
 export interface BoxConfig extends XYZ, WH, Mass, CollisionFlag {
@@ -120,6 +121,7 @@ export interface BoxConfig extends XYZ, WH, Mass, CollisionFlag {
   depthSegments?: number
   friction?: number
   collisionFlag?: number
+  breakable?: boolean
 }
 
 export interface GroundConfig extends BoxConfig {
@@ -137,10 +139,12 @@ export interface CylinderConfig extends XYZ, WH, Mass, CollisionFlag {
   openEnded?: boolean
   thetaStart?: number
   thetaLength?: number
+  breakable?: boolean
 }
 
 export interface ExtrudeConfig extends XYZ, Mass, CollisionFlag, ExtrudeGeometryOptions {
   name?: string
   shape: Shape
   autoCenter?: boolean
+  breakable?: boolean
 }
