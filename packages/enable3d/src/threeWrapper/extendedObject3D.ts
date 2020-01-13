@@ -30,6 +30,7 @@ class ExtendedObject3D extends Object3D {
   action: AnimationAction
   currentAnimation: string = ''
   breakable: boolean
+  fragmentDepth: number
   collided: boolean
 
   setAction(name: string) {
